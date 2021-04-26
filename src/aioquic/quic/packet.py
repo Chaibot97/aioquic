@@ -19,6 +19,7 @@ PACKET_TYPE_ZERO_RTT = PACKET_LONG_HEADER | PACKET_FIXED_BIT | 0x10
 PACKET_TYPE_HANDSHAKE = PACKET_LONG_HEADER | PACKET_FIXED_BIT | 0x20
 PACKET_TYPE_RETRY = PACKET_LONG_HEADER | PACKET_FIXED_BIT | 0x30
 PACKET_TYPE_ONE_RTT = PACKET_FIXED_BIT
+PACKET_TYPE_REPAIR = 0x0a
 PACKET_TYPE_MASK = 0xF0
 
 CONNECTION_ID_MAX_SIZE = 20
@@ -70,6 +71,10 @@ class QuicHeader:
     token: bytes = b""
     integrity_tag: bytes = b""
     rest_length: int = 0
+    is_repair_header: bool = False
+    nss: bytes
+    fss_esi: bytes
+    repair_key: bytes
 
 
 def decode_packet_number(truncated: int, num_bits: int, expected: int) -> int:
@@ -132,6 +137,9 @@ def is_draft_version(version: int) -> bool:
 def is_long_header(first_byte: int) -> bool:
     return bool(first_byte & PACKET_LONG_HEADER)
 
+def is_repair_header(first_byte: int) -> bool:
+    return not bool(first_byte ^ PACKET_TYPE_REPAIR)
+
 
 def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> QuicHeader:
     first_byte = buf.pull_uint8()
@@ -188,6 +196,20 @@ def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> Quic
             token=token,
             integrity_tag=integrity_tag,
             rest_length=rest_length,
+        )
+    else if is_repair_header(first_byte):
+        # repair header packet
+        destination_cid = buf.pull_bytes(destination_cid_length)
+        nss = buf.pull_uint8()
+        fss_esi = buf.pull_uint32()
+        repair_key = buf.pull_uint8()
+        return QuicHeader(
+            is_long_header=False,
+            is_repair_header=True,
+            destination_cid=destination_cid,
+            nss=nss,
+            fss_esi=fss_esi,
+            repair_key=repair_key
         )
     else:
         # short header packet

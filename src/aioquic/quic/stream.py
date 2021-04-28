@@ -1,5 +1,4 @@
 from typing import Optional
-import numpy as np
 
 from . import events
 from .packet import QuicErrorCode, QuicResetStreamFrame, QuicStreamFrame
@@ -172,8 +171,8 @@ class QuicStream:
 
             # pad src array
             src_array = self._send_fec_window
-            max_len = np.amax([len(src_array[i]) for i in range(len(src_array))])
-            src_array_padded = [np.array(src_array[i]).resize(max_len) for i in range(len(src_array))]
+            max_len = max([len(src_array[i]) for i in range(len(src_array))])
+            src_array_padded = [src_array[i] + (max_len - len(src_array[i])) * [0] for i in range(len(src_array))]
 
             # repair key: 8 bytes total
             repair_key = self.stream_id.to_bytes(4, 'big') + self._send_fec_window_last_offset.to_bytes(4, 'big')

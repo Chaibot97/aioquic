@@ -193,6 +193,8 @@ class QuicStream:
         """
         # reserve 2 bytes for FEC window length (1 byte) and repair data offset (1 byte)
         max_size = max_size - 2
+        if max_size <= 0:
+            return None
 
         # send repair frame if possible
         self._build_repair_data()

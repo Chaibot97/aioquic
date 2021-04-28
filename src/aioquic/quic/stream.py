@@ -1,4 +1,5 @@
 from typing import Optional
+import numpy as np
 
 from . import events
 from .packet import QuicErrorCode, QuicResetStreamFrame, QuicStreamFrame
@@ -8,7 +9,6 @@ from ..fec.tiny_mt_32 import *
 
 EW_SIZE = 5
 FEC_PACE = 2
-MAX_STREAM_FRAME_SIZE = 800
 MAX_DENSITY = 15
 
 
@@ -168,8 +168,10 @@ class QuicStream:
         if self._send_fec_count == self._send_fec_pace:
             self._send_fec_count = 0
 
-            # padded src array
+            # pad src array
             src_array = self._send_fec_window
+            max_len = np.amax([len(src_array[i]) for i in range(len(src_array))])
+            src_array_padded = [np.array(src_array[i]).resize(max_len) for i in range(len(src_array))]
 
             # repair key: 8 bytes total
             repair_key = self.stream_id.to_bytes(4, 'big') + self._send_fec_window_last_offset.to_bytes(4, 'big')
@@ -233,7 +235,7 @@ class QuicStream:
 
         # add fec data
         self._send_fec_window.append(data)
-        if len(self._send_fec_window) > self._send_fec_ew_size:
+        while len(self._send_fec_window) > self._send_fec_ew_size:
             self._send_fec_window.pop()
         self._send_fec_count += 1
         self._send_fec_window_last_offset = start

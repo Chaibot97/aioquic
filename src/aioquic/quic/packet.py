@@ -137,6 +137,7 @@ def is_draft_version(version: int) -> bool:
 def is_long_header(first_byte: int) -> bool:
     return bool(first_byte & PACKET_LONG_HEADER)
 
+
 def is_repair_header(first_byte: int) -> bool:
     return not bool(first_byte ^ PACKET_TYPE_REPAIR)
 
@@ -197,11 +198,13 @@ def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> Quic
             integrity_tag=integrity_tag,
             rest_length=rest_length,
         )
-    else if is_repair_header(first_byte):
+    elif is_repair_header(first_byte):
         # repair header packet
-        destination_cid = buf.pull_bytes(destination_cid_length)
+        destination_cid = buf.pull_bytes(host_cid_length)
+
+        # fss_esi/packet_number (16 bit) + nss (8 bits) + repair_key (8 bits)
+        fss_esi = buf.pull_uint16()
         nss = buf.pull_uint8()
-        fss_esi = buf.pull_uint32()
         repair_key = buf.pull_uint8()
         return QuicHeader(
             is_long_header=False,
@@ -218,6 +221,10 @@ def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> Quic
 
         packet_type = first_byte & PACKET_TYPE_MASK
         destination_cid = buf.pull_bytes(host_cid_length)
+
+        # pull the extra two padding bytes
+        buf.pull_uint16()
+
         return QuicHeader(
             is_long_header=False,
             version=None,

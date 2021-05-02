@@ -12,9 +12,11 @@ from .packet import (
     PACKET_NUMBER_MAX_SIZE,
     PACKET_TYPE_HANDSHAKE,
     PACKET_TYPE_INITIAL,
+    PACKET_TYPE_REPAIR,
     PACKET_TYPE_MASK,
     QuicFrameType,
     is_long_header,
+    is_repair_header
 )
 
 PACKET_MAX_SIZE = 1280
@@ -94,9 +96,14 @@ class QuicPacketBuilder:
         self._packet: Optional[QuicSentPacket] = None
         self._packet_crypto: Optional[CryptoPair] = None
         self._packet_long_header = False
+        self._packet_repair_header = False
         self._packet_number = packet_number
         self._packet_start = 0
         self._packet_type = 0
+
+        # short header datagram record (used by fec)
+        self.current_short_header_packet_payload = Optional[bytes]
+        self.current_short_header_packet_num = 0
 
         self._buffer = Buffer(PACKET_MAX_SIZE)
         self._buffer_capacity = PACKET_MAX_SIZE
@@ -142,6 +149,10 @@ class QuicPacketBuilder:
             - self._packet_crypto.aead_tag_size
         )
 
+    def try_end_packet(self) -> None:
+        if self._packet is not None:
+            self._end_packet()
+
     def flush(self) -> Tuple[List[bytes], List[QuicSentPacket]]:
         """
         Returns the assembled datagrams.
@@ -183,6 +194,29 @@ class QuicPacketBuilder:
             self._packet.delivery_handlers.append((handler, handler_args))
         return self._buffer
 
+    def build_repair_packet(self, crypto: CryptoPair, fss_esi, nss, repair_key, payload) -> None:
+        """
+        Build a repair packet
+        """
+        packet_type = PACKET_TYPE_REPAIR
+
+        # start a new datagram to send repair packet (non-collapse)
+        self._flush_current_datagram()
+
+        # start the packet and manually set fss_esi
+        self.start_packet(packet_type, crypto)
+        self._packet.packet_number = fss_esi
+
+        # insert nss, repair_key, and payload
+        buf = self._buffer
+        buf.seek(self._packet_start + self._header_size - 2)
+        buf.push_uint8(nss)
+        buf.push_uint8(repair_key)
+        buf.push_bytes(payload)
+
+        # end packet (This is force flush datagram because it is not long header)
+        self._end_packet()
+
     def start_packet(self, packet_type: int, crypto: CryptoPair) -> None:
         """
         Starts a new packet.
@@ -192,6 +226,9 @@ class QuicPacketBuilder:
         # finish previous datagram
         if self._packet is not None:
             self._end_packet()
+
+        # clear previous short header packet record
+        self.current_short_header_packet_payload = None
 
         # if there is too little space remaining, start a new datagram
         # FIXME: the limit is arbitrary!
@@ -223,7 +260,9 @@ class QuicPacketBuilder:
                 token_length = len(self._peer_token)
                 header_size += size_uint_var(token_length) + token_length
         else:
-            header_size = 3 + len(self._peer_cid)
+            # keep short header size consistent with repair header
+            # as this ensures the repair packet can be sent in one packet
+            header_size = 3 + 2 + len(self._peer_cid)
 
         # check we have enough space
         if packet_start + header_size >= self._buffer_capacity:
@@ -238,6 +277,7 @@ class QuicPacketBuilder:
             epoch = Epoch.ONE_RTT
 
         self._header_size = header_size
+
         self._packet = QuicSentPacket(
             epoch=epoch,
             in_flight=False,
@@ -248,6 +288,7 @@ class QuicPacketBuilder:
         )
         self._packet_crypto = crypto
         self._packet_long_header = packet_long_header
+        self._packet_repair_header = is_repair_header(packet_type)
         self._packet_start = packet_start
         self._packet_type = packet_type
         self.quic_logger_frames = self._packet.quic_logger_frames
@@ -340,15 +381,31 @@ class QuicPacketBuilder:
 
             # short header packets cannot be coallesced, we need a new datagram
             if not self._packet_long_header:
+                # record the short header packet
+                if not self._packet_repair_header:
+                    self._record_short_header_packet()
+
+                # flush the datagram
                 self._flush_current_datagram()
 
-            self._packet_number += 1
+            # do not increase packet number in case of repair packet
+            if not self._packet_repair_header:
+                self._packet_number += 1
+
         else:
             # "cancel" the packet
             buf.seek(self._packet_start)
 
         self._packet = None
         self.quic_logger_frames = None
+
+    def _record_short_header_packet(self) -> None:
+        payload_start = self._packet_start + self._header_size
+        payload_end = self._buffer.tell()
+
+        # record the payload and the packet number
+        self.current_short_header_packet_payload = self._buffer.data[payload_start:payload_end]
+        self.current_short_header_packet_num = self._packet.packet_number
 
     def _flush_current_datagram(self) -> None:
         datagram_bytes = self._buffer.tell()

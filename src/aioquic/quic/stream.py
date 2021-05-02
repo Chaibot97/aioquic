@@ -4,11 +4,6 @@ from . import events
 from .packet import QuicErrorCode, QuicResetStreamFrame, QuicStreamFrame
 from .packet_builder import QuicDeliveryState
 from .rangeset import RangeSet
-from ..fec.tiny_mt_32 import *
-
-EW_SIZE = 5
-FEC_PACE = 2
-MAX_DENSITY = 15
 
 
 class FinalSizeError(Exception):
@@ -16,12 +11,11 @@ class FinalSizeError(Exception):
 
 
 class QuicStream:
-
     def __init__(
-            self,
-            stream_id: Optional[int] = None,
-            max_stream_data_local: int = 0,
-            max_stream_data_remote: int = 0,
+        self,
+        stream_id: Optional[int] = None,
+        max_stream_data_local: int = 0,
+        max_stream_data_remote: int = 0,
     ) -> None:
         self.is_blocked = False
         self.max_stream_data_local = max_stream_data_local
@@ -45,15 +39,6 @@ class QuicStream:
         self._send_pending_eof = False
         self._send_reset_error_code: Optional[int] = None
         self._send_reset_pending = False
-
-        # sender FEC
-        self._send_fec_window = []  # all the frame data (excluding 2 reserved bytes) within window
-        self._send_fec_window_last_offset: int = 0  # the offset of the last sent src frame in the window
-        self._send_fec_ew_size = EW_SIZE  # the maximum number of src frames the repair frame covers
-        self._send_fec_pace = FEC_PACE  # send 1 repair frame after sending every FEC_PACE src frames
-        self._send_src_cnt = 0  # track the number of src frames we sent without sending repair frame
-        self._send_repair_data = bytearray()  # in case cannot send repair frame in a single frame
-        self._send_repair_offset = 0  # in case cannot send repair frame in a single frame
 
         self.__stream_id = stream_id
 
@@ -108,7 +93,7 @@ class QuicStream:
         gap = pos - len(self._recv_buffer)
         if gap > 0:
             self._recv_buffer += bytearray(gap)
-        self._recv_buffer[pos: pos + count] = frame.data
+        self._recv_buffer[pos : pos + count] = frame.data
 
         # return data from the front of the buffer
         data = self._pull_data()
@@ -153,7 +138,7 @@ class QuicStream:
             return self._send_buffer_stop
 
     def handle_reset(
-            self, *, final_size: int, error_code: int = QuicErrorCode.NO_ERROR
+        self, *, final_size: int, error_code: int = QuicErrorCode.NO_ERROR
     ) -> Optional[events.StreamReset]:
         """
         Handle an abrupt termination of the receiving part of the QUIC stream.
@@ -163,62 +148,12 @@ class QuicStream:
         self._recv_final_size = final_size
         return events.StreamReset(error_code=error_code, stream_id=self.__stream_id)
 
-    def _build_repair_data(self) -> None:
-        # only build repair data when reaching fec pace and finish sending all the previous repair_data
-        if self._send_src_cnt == self._send_fec_pace and len(self._send_repair_data) == 0:
-            self._send_src_cnt = 0
-            self._send_repair_offset = 0
-
-            # pad src array
-            src_array = self._send_fec_window
-            max_len = max([len(src_array[i]) for i in range(len(src_array))])
-            src_array_padded = [src_array[i] + (max_len - len(src_array[i])) * [0] for i in range(len(src_array))]
-
-            # repair key: 8 bytes total
-            repair_key = self.stream_id.to_bytes(4, 'big') + self._send_fec_window_last_offset.to_bytes(4, 'big')
-
-            # coeffs
-            window_len = len(src_array)  # window_len <= EW_SIZE
-            coeffs = generate_coding_coefficients(repair_key, window_len, MAX_DENSITY)
-
-            # TODO generate repair symbol data
-            self._send_repair_data = bytearray("this should be the repair data", 'utf-8')
-
     def get_frame(
-            self, max_size: int, max_offset: Optional[int] = None
+        self, max_size: int, max_offset: Optional[int] = None
     ) -> Optional[QuicStreamFrame]:
         """
         Get a frame of data to send.
         """
-        # reserve 2 bytes for FEC window length (1 byte) and repair data offset (1 byte)
-        max_size = max_size - 2
-        if max_size <= 0:
-            return None
-
-        # send repair frame if possible
-        self._build_repair_data()
-        if len(self._send_repair_data) > 0:
-            # calculate the repair_data we can send in current frame
-            end = min(len(self._send_repair_data), max_size)  # repair data does not need flow control
-            repair_data = self._send_repair_data[:end]
-            del self._send_buffer[:end]
-
-            # encode window length and repair offset
-            window_len = len(self._send_fec_window).to_bytes(1, 'big')
-            repair_offset = self._send_repair_offset + ((len(self._send_repair_data) == 0) << 7)
-            repair_offset = repair_offset.to_bytes(1, 'big')
-
-            # update repair offset (in case we cannot send all the repair data in current frame)
-            self._send_repair_offset += 1
-
-            # build the repair frame: window_len (1 byte) + repair_offset (1 byte) + repair_data
-            repair_frame_data = window_len + repair_offset + bytes(repair_data)
-            repair_frame = QuicStreamFrame(
-                data=repair_frame_data,
-                offset=self._send_fec_window_last_offset,
-            )
-            return repair_frame
-
         # get the first pending data range
         try:
             r = self._send_pending[0]
@@ -239,22 +174,13 @@ class QuicStream:
         if stop <= start:
             return None
 
-        # get the data in the range
-        data = self._send_buffer[
-               start - self._send_buffer_start: stop - self._send_buffer_start
-               ]
-
-        # add fec data
-        self._send_fec_window.append(data)
-        while len(self._send_fec_window) > self._send_fec_ew_size:
-            self._send_fec_window.pop()
-        self._send_src_cnt += 1
-        self._send_fec_window_last_offset = start
-
         # create frame
-        data_frame_symbol = 0  # the first byte in data section is used for check data frame / repair frame
         frame = QuicStreamFrame(
-            data=data_frame_symbol.to_bytes(1, 'big') + bytes(data),
+            data=bytes(
+                self._send_buffer[
+                    start - self._send_buffer_start : stop - self._send_buffer_start
+                ]
+            ),
             offset=start,
         )
         self._send_pending.subtract(start, stop)
@@ -277,7 +203,7 @@ class QuicStream:
         )
 
     def on_data_delivery(
-            self, delivery: QuicDeliveryState, start: int, stop: int
+        self, delivery: QuicDeliveryState, start: int, stop: int
     ) -> None:
         """
         Callback when sent data is ACK'd.

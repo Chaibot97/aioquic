@@ -85,5 +85,3 @@ def generate_coding_coefficients(repair_key, window_size, dt):
             else:
                 res.append(0)
     return res
-
-

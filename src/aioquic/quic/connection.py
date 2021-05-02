@@ -48,6 +48,9 @@ from .packet_builder import (
 from .recovery import K_GRANULARITY, QuicPacketRecovery, QuicPacketSpace
 from .stream import FinalSizeError, QuicStream
 
+from ..fec.gf256_op import GF256LinearCombination
+from ..fec.tiny_mt_32 import generate_coding_coefficients
+
 logger = logging.getLogger("quic")
 
 CRYPTO_BUFFER_SIZE = 16384
@@ -93,6 +96,12 @@ RESET_STREAM_CAPACITY = 1 + 8 + 8 + 8
 RETIRE_CONNECTION_ID_CAPACITY = 1 + 8
 STREAMS_BLOCKED_CAPACITY = 1 + 8
 TRANSPORT_CLOSE_FRAME_CAPACITY = 1 + 8 + 8 + 8  # + reason length
+
+# FEC
+EW_SIZE = 5
+FEC_PACE = 2
+FEC_MAX_DENSITY = 15
+FEC_REPAIR_KEY_UPPER_BOUND = 2**8  # we only have 8 bits to store this value
 
 
 def EPOCHS(shortcut: str) -> FrozenSet[tls.Epoch]:
@@ -404,6 +413,14 @@ class QuicConnection:
             0x30: (self._handle_datagram_frame, EPOCHS("01")),
             0x31: (self._handle_datagram_frame, EPOCHS("01")),
         }
+
+        # fec
+        self._fec_window = []  # all the packet data
+        self._fec_window_last_packet_num = 0
+        self._fec_ew_size = EW_SIZE  # the maximum number of src symbols the repair symbol covers
+        self._fec_pace = FEC_PACE  # send 1 repair symbol after sending every FEC_PACE src symbols
+        self._fec_src_cnt = 0  # track the number of consecutive src symbols without sending the repair symbol
+        self._fec_repair_key = 0
 
     @property
     def configuration(self) -> QuicConfiguration:
@@ -2538,6 +2555,7 @@ class QuicConnection:
                 self._pacing_at = self._loss._pacer.next_send_time(now=now)
                 if self._pacing_at is not None:
                     break
+
             builder.start_packet(packet_type, crypto)
 
             if self._handshake_complete:
@@ -2657,7 +2675,49 @@ class QuicConnection:
             if builder.packet_is_empty:
                 break
             else:
+                # add repair packet
+                self._try_add_repair_packet(builder, crypto)
+
                 self._loss._pacer.update_after_send(now=now)
+
+    def _try_add_repair_packet(self, builder: QuicPacketBuilder, crypto: CryptoPair) -> None:
+        # try end the current packet if possible
+        builder.try_end_packet()
+
+        # fetch the short header packet payload if possible
+        payload = builder.current_short_header_packet_payload
+        if payload is not None:
+            # increase the src_cnt (the number of consecutive short header packet without sending repair packet)
+            self._fec_src_cnt += 1
+
+            # record last short header packet sent
+            self._fec_window.append(payload)
+            self._fec_window_last_packet_num = builder.current_short_header_packet_num
+
+            # adjust the window
+            while len(self._fec_window) > self._fec_ew_size:
+                self._fec_window.pop(0)
+
+            # send repair if possible
+            if self._fec_src_cnt == self._fec_pace:
+                # clear src sent cnt
+                self._fec_src_cnt = 0
+
+                # repair key
+                repair_key = self._fec_repair_key
+                self._fec_repair_key = (repair_key + 1) % FEC_REPAIR_KEY_UPPER_BOUND
+
+                fss_esi = self._fec_window_last_packet_num
+                nss = len(self._fec_window)
+
+                # get coeffs
+                window_size = len(self._fec_window)
+                coeffs = generate_coding_coefficients(repair_key, window_size, FEC_MAX_DENSITY)
+
+                # compute repair payload
+                payload = GF256LinearCombination(self._fec_window, coeffs)
+
+                builder.build_repair_packet(crypto, fss_esi, nss, repair_key, payload)
 
     def _write_handshake(
         self, builder: QuicPacketBuilder, epoch: tls.Epoch, now: float

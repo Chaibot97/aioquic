@@ -1,4 +1,4 @@
-from gf256_table import gf256_mul_table, gf256_inv_table
+from .gf256_table import gf256_mul_table, gf256_inv_table
 import typing
 
 class GF256Number:
@@ -92,7 +92,7 @@ class GF256Vector:
   def __str__(self):
     return ' '.join([str(x) for x in self.v])
 
-def GF256LinearCombination(vectors: [bytearray], coefficients: [int]) -> bytearray:
+def GF256LinearCombination(vectors: [bytes], coefficients: [int]) -> bytes:
   max_len = max([len(vector) for vector in vectors])
   vectors = [GF256Vector(vector, max_len - len(vector)) for vector in vectors]
 
@@ -101,12 +101,12 @@ def GF256LinearCombination(vectors: [bytearray], coefficients: [int]) -> bytearr
   for v, c in zip(vectors, coefficients):
     res += v.scale(GF256Number(c))
 
-  return bytearray(res.toListOfInt())
+  return bytes(res.toListOfInt())
 
-def GF256PacketRecover(repair_vectors: [bytearray],
-                       data_vectors: [bytearray],
+def GF256PacketRecover(repair_vectors: [bytes],
+                       data_vectors: [bytes],
                        coefficients: [int],
-                       lost_coefficients: [int]) -> [bytearray]:
+                       lost_coefficients: [int]) -> [bytes]:
   max_len = max([len(vector) for vector in data_vectors])
   max_len = max(max_len, len(repair_vectors[0]))
 
@@ -127,7 +127,7 @@ def GF256PacketRecover(repair_vectors: [bytearray],
   gf256_system.gaussElimination()
   gf256_system.solve()
 
-  recovered_packets = [bytearray(con.toListOfInt()) for con in gf256_system.cons]
+  recovered_packets = [bytes(con.toListOfInt()) for con in gf256_system.cons]
   return recovered_packets
 
 
@@ -273,9 +273,9 @@ if __name__ == "__main__":
   assert k.dot(kk) == 4
 
   # testing packet recovery
-  a = bytearray("abc", 'utf-8')
-  b = bytearray("xyz", 'utf-8')
-  c = bytearray("jkl", 'utf-8')
+  a = bytes("abc", 'utf-8')
+  b = bytes("xyz", 'utf-8')
+  c = bytes("jkl", 'utf-8')
   coef1 = [2, 5, 8]
   coef2 = [3, 7, 1]
 

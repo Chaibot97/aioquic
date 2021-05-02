@@ -72,9 +72,8 @@ class QuicHeader:
     integrity_tag: bytes = b""
     rest_length: int = 0
     is_repair_header: bool = False
-    nss: bytes
-    fss_esi: bytes
-    repair_key: bytes
+    nss: Optional[int] = None
+    repair_key: Optional[int] = None
 
 
 def decode_packet_number(truncated: int, num_bits: int, expected: int) -> int:
@@ -202,16 +201,20 @@ def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> Quic
         # repair header packet
         destination_cid = buf.pull_bytes(host_cid_length)
 
-        # fss_esi/packet_number (16 bit) + nss (8 bits) + repair_key (8 bits)
-        fss_esi = buf.pull_uint16()
+        # nss (8 bits) + repair_key (8 bits) + fsi_ess (packet_number) (2 bytes)
+        # To ensure consistency between long header, short header, and repair header, fsi_ess (packet number) is not
+        # extracted here, as it is not part of the header. You will need to call buf.pull_uint16() to get fsi_ess later
         nss = buf.pull_uint8()
         repair_key = buf.pull_uint8()
         return QuicHeader(
             is_long_header=False,
-            is_repair_header=True,
+            version=None,
+            packet_type=PACKET_TYPE_REPAIR,
             destination_cid=destination_cid,
+            source_cid=b"",
+            token=b"",
+            is_repair_header=True,
             nss=nss,
-            fss_esi=fss_esi,
             repair_key=repair_key
         )
     else:
@@ -222,7 +225,7 @@ def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> Quic
         packet_type = first_byte & PACKET_TYPE_MASK
         destination_cid = buf.pull_bytes(host_cid_length)
 
-        # pull the extra two padding bytes
+        # pull the extra two padding bytes (added to ensure consistent between short header and repair header)
         buf.pull_uint16()
 
         return QuicHeader(

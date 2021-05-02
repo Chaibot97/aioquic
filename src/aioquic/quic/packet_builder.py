@@ -207,11 +207,16 @@ class QuicPacketBuilder:
         self.start_packet(packet_type, crypto)
         self._packet.packet_number = fss_esi
 
-        # insert nss, repair_key, and payload
+        # insert nss, repair_key
+        # header structure: ...nss (1 byte) + repair_key (1 byte) + packet_number (2 byte)
+        # nss starts at packet_start + header_size - 4
         buf = self._buffer
-        buf.seek(self._packet_start + self._header_size - 2)
+        buf.seek(self._packet_start + self._header_size - 4)
         buf.push_uint8(nss)
         buf.push_uint8(repair_key)
+
+        # push payload
+        buf.seek(self._packet_start + self._header_size)
         buf.push_bytes(payload)
 
         # end packet (This is force flush datagram because it is not long header)
@@ -362,6 +367,12 @@ class QuicPacketBuilder:
                     | (PACKET_NUMBER_SEND_SIZE - 1)
                 )
                 buf.push_bytes(self._peer_cid)
+
+                # the following two bytes will be used by repair header to set nss and repair_key
+                # we need to jump over two bytes to ensure consistency between short header and repair header
+                # this will ensure the repair packet can be sent in one single packet
+                buf.seek(buf.tell() + 2)
+
                 buf.push_uint16(self._packet_number & 0xFFFF)
 
             # encrypt in place

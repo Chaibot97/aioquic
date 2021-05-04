@@ -306,7 +306,9 @@ class QuicConnection:
         self._loss_at: Optional[float] = None
         self._network_paths: List[QuicNetworkPath] = []
         self._pacing_at: Optional[float] = None
-        self._packet_number = 0
+        self._packet_number_initial = 0
+        self._packet_number_handshake = 0
+        self._packet_number_onertt = 0
         self._parameters_received = False
         self._peer_cid = QuicConnectionId(
             cid=os.urandom(configuration.connection_id_length), sequence_number=None
@@ -507,7 +509,9 @@ class QuicConnection:
         builder = QuicPacketBuilder(
             host_cid=self.host_cid,
             is_client=self._is_client,
-            packet_number=self._packet_number,
+            packet_number_initial=self._packet_number_initial,
+            packet_number_handshake=self._packet_number_handshake,
+            packet_number_onertt=self._packet_number_onertt,
             peer_cid=self._peer_cid.cid,
             peer_token=self._peer_token,
             quic_logger=self._quic_logger,
@@ -565,7 +569,8 @@ class QuicConnection:
         datagrams, packets = builder.flush()
 
         if datagrams:
-            self._packet_number = builder.packet_number
+            self._packet_number_initial, self._packet_number_handshake, self._packet_number_onertt \
+                = builder.get_packet_numbers()
 
             # register packets
             sent_handshake = False
@@ -777,7 +782,9 @@ class QuicConnection:
                     )
                     self._close_end()
                     return
-                self._packet_number = 0
+                self._packet_number_initial = 0
+                self._packet_number_handshake = 0
+                self._packet_number_onertt = 0
                 self._version = QuicProtocolVersion(common[0])
                 self._version_negotiation_count += 1
                 self._logger.info("Retrying with %s", self._version)

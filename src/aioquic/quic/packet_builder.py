@@ -66,7 +66,9 @@ class QuicPacketBuilder:
         peer_cid: bytes,
         version: int,
         is_client: bool,
-        packet_number: int = 0,
+        packet_number_initial: int = 0,
+        packet_number_handshake: int = 0,
+        packet_number_onertt: int = 0,
         peer_token: bytes = b"",
         quic_logger: Optional[QuicLoggerTrace] = None,
         spin_bit: bool = False,
@@ -97,9 +99,12 @@ class QuicPacketBuilder:
         self._packet_crypto: Optional[CryptoPair] = None
         self._packet_long_header = False
         self._packet_repair_header = False
-        self._packet_number = packet_number
+        self._packet_number_initial = packet_number_initial
+        self._packet_number_handshake = packet_number_handshake
+        self._packet_number_onertt = packet_number_onertt
         self._packet_start = 0
         self._packet_type = 0
+        self._space = Epoch.INITIAL
 
         # short header datagram record (used by fec)
         self.current_short_header_packet_payload = Optional[bytes]
@@ -123,7 +128,26 @@ class QuicPacketBuilder:
         """
         Returns the packet number for the next packet.
         """
-        return self._packet_number
+        return self._get_packet_number()
+
+    def _get_packet_number(self) -> int:
+        if self._space == Epoch.INITIAL:
+            return self._packet_number_initial
+        elif self._space == Epoch.HANDSHAKE:
+            return self._packet_number_handshake
+        else:
+            return self._packet_number_onertt
+
+    @property
+    def packet_number_initial(self) -> int:
+        return self._packet_number_initial
+
+    @property
+    def packet_number_handshake(self) -> int:
+        return self._packet_number_handshake
+
+    def get_packet_numbers(self) -> tuple:
+        return self._packet_number_initial, self._packet_number_handshake, self._packet_number_onertt
 
     @property
     def remaining_buffer_space(self) -> int:
@@ -281,6 +305,9 @@ class QuicPacketBuilder:
         else:
             epoch = Epoch.ONE_RTT
 
+        # switch space if needed
+        self._space = epoch
+
         self._header_size = header_size
 
         self._packet = QuicSentPacket(
@@ -288,7 +315,7 @@ class QuicPacketBuilder:
             in_flight=False,
             is_ack_eliciting=False,
             is_crypto_packet=False,
-            packet_number=self._packet_number,
+            packet_number=self._get_packet_number(),
             packet_type=packet_type,
         )
         self._packet_crypto = crypto
@@ -299,6 +326,14 @@ class QuicPacketBuilder:
         self.quic_logger_frames = self._packet.quic_logger_frames
 
         buf.seek(self._packet_start + self._header_size)
+
+    def _increment_packet_number(self) -> None:
+        if self._space == Epoch.INITIAL:
+            self._packet_number_initial += 1
+        elif self._space == Epoch.HANDSHAKE:
+            self._packet_number_handshake += 1
+        else:
+            self._packet_number_onertt += 1
 
     def _end_packet(self) -> None:
         """
@@ -357,7 +392,7 @@ class QuicPacketBuilder:
                     buf.push_uint_var(len(self._peer_token))
                     buf.push_bytes(self._peer_token)
                 buf.push_uint16(length | 0x4000)
-                buf.push_uint16(self._packet_number & 0xFFFF)
+                buf.push_uint16(self._get_packet_number() & 0xFFFF)
             else:
                 buf.seek(self._packet_start)
                 buf.push_uint8(
@@ -373,7 +408,7 @@ class QuicPacketBuilder:
                 # this will ensure the repair packet can be sent in one single packet
                 buf.seek(buf.tell() + 2)
 
-                buf.push_uint16(self._packet_number & 0xFFFF)
+                buf.push_uint16(self._get_packet_number() & 0xFFFF)
 
             # encrypt in place
             plain = buf.data_slice(self._packet_start, self._packet_start + packet_size)
@@ -382,7 +417,7 @@ class QuicPacketBuilder:
                 self._packet_crypto.encrypt_packet(
                     plain[0 : self._header_size],
                     plain[self._header_size : packet_size],
-                    self._packet_number,
+                    self._get_packet_number(),
                 )
             )
             self._packet.sent_bytes = buf.tell() - self._packet_start
@@ -401,7 +436,7 @@ class QuicPacketBuilder:
 
             # do not increase packet number in case of repair packet
             if not self._packet_repair_header:
-                self._packet_number += 1
+                self._increment_packet_number()
 
         else:
             # "cancel" the packet

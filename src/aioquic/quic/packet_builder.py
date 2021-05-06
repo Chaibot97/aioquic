@@ -226,10 +226,11 @@ class QuicPacketBuilder:
 
         # start a new datagram to send repair packet (non-collapse)
         self._flush_current_datagram()
+        old_packet_number = self._packet_number_onertt
+        self._packet_number_onertt = fss_esi
 
         # start the packet and manually set fss_esi
         self.start_packet(packet_type, crypto)
-        self._packet.packet_number = fss_esi
 
         # insert nss, repair_key
         # header structure: ...nss (1 byte) + repair_key (1 byte) + packet_number (2 byte)
@@ -245,6 +246,7 @@ class QuicPacketBuilder:
 
         # end packet (This is force flush datagram because it is not long header)
         self._end_packet()
+        self._packet_number_onertt = old_packet_number
 
     def start_packet(self, packet_type: int, crypto: CryptoPair) -> None:
         """
@@ -395,12 +397,15 @@ class QuicPacketBuilder:
                 buf.push_uint16(self._get_packet_number() & 0xFFFF)
             else:
                 buf.seek(self._packet_start)
-                buf.push_uint8(
-                    self._packet_type
-                    | (self._spin_bit << 5)
-                    | (self._packet_crypto.key_phase << 2)
-                    | (PACKET_NUMBER_SEND_SIZE - 1)
-                )
+                if self._packet_type == PACKET_TYPE_REPAIR:
+                    buf.push_uint8(PACKET_TYPE_REPAIR)
+                else:
+                    buf.push_uint8(
+                        self._packet_type
+                        | (self._spin_bit << 5)
+                        | (self._packet_crypto.key_phase << 2)
+                        | (PACKET_NUMBER_SEND_SIZE - 1)
+                    )
                 buf.push_bytes(self._peer_cid)
 
                 # the following two bytes will be used by repair header to set nss and repair_key
@@ -412,6 +417,12 @@ class QuicPacketBuilder:
 
             # encrypt in place
             plain = buf.data_slice(self._packet_start, self._packet_start + packet_size)
+
+            # record the payload and the packet number for FEC
+            if not self._packet_long_header and self._packet_type != PACKET_TYPE_REPAIR:
+                self.current_short_header_packet_payload = plain[self._header_size : packet_size]
+                self.current_short_header_packet_num = self._packet.packet_number
+
             buf.seek(self._packet_start)
             buf.push_bytes(
                 self._packet_crypto.encrypt_packet(
@@ -427,10 +438,6 @@ class QuicPacketBuilder:
 
             # short header packets cannot be coallesced, we need a new datagram
             if not self._packet_long_header:
-                # record the short header packet
-                if not self._packet_repair_header:
-                    self._record_short_header_packet()
-
                 # flush the datagram
                 self._flush_current_datagram()
 
@@ -444,14 +451,6 @@ class QuicPacketBuilder:
 
         self._packet = None
         self.quic_logger_frames = None
-
-    def _record_short_header_packet(self) -> None:
-        payload_start = self._packet_start + self._header_size
-        payload_end = self._buffer.tell()
-
-        # record the payload and the packet number
-        self.current_short_header_packet_payload = self._buffer.data[payload_start:payload_end]
-        self.current_short_header_packet_num = self._packet.packet_number
 
     def _flush_current_datagram(self) -> None:
         datagram_bytes = self._buffer.tell()

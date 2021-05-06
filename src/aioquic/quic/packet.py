@@ -213,6 +213,7 @@ def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> Quic
             destination_cid=destination_cid,
             source_cid=b"",
             token=b"",
+            rest_length=buf.capacity - buf.tell(),
             is_repair_header=True,
             nss=nss,
             repair_key=repair_key

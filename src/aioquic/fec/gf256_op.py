@@ -40,14 +40,8 @@ class GF256Number:
     return str(self.n)
 
 class GF256Vector:
-  def __init__(self, v: [int], padding:int = 0, trailing:int = 0):
-    self.v = [GF256Number(0) for i in range(padding)] + [GF256Number(n) for n in v] + [GF256Number(0) for i in range(trailing)]
-
-  def pad(self, padding:int):
-    self.v = [GF256Number(0) for i in range(padding)] + self.v
-
-  def augment(self, padding:int):
-    self.v = self.v + [GF256Number(0) for i in range(padding)]
+  def __init__(self, v: [int], padding:int = 0):
+    self.v = [GF256Number(n) for n in v] + [GF256Number(0x40) for i in range(padding)]
 
   def scale(self, c: GF256Number):
     res = GF256Vector([])
@@ -111,7 +105,7 @@ def GF256PacketRecover(repair_vectors: [bytes],
   max_len = max(max_len, len(repair_vectors[0]))
 
   repair_vectors = [GF256Vector(vector) for vector in repair_vectors]
-  data_vectors = [GF256Vector(vector, trailing=max_len - len(vector)) for vector in data_vectors]
+  data_vectors = [GF256Vector(vector, max_len - len(vector)) for vector in data_vectors]
   coefficients = [GF256Vector(coefficient) for coefficient in coefficients]
   lost_coefficients = [GF256Vector(coefficient) for coefficient in lost_coefficients]
 

@@ -972,7 +972,7 @@ class QuicConnection:
 
             plain_payloads = []
             if not header.is_repair_header:
-                plain_payloads.append(plain_payloads)
+                plain_payloads.append(plain_payload)
 
             if not header.is_long_header:
                 if header.is_repair_header:

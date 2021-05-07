@@ -49,6 +49,7 @@ from .packet_builder import (
 from .recovery import K_GRANULARITY, QuicPacketRecovery, QuicPacketSpace
 from .stream import FinalSizeError, QuicStream
 
+from ..fec.fec import RepairSymbol, SourceSymbol, FECRecoverer
 from ..fec.gf256_op import GF256LinearCombination
 from ..fec.tiny_mt_32 import generate_coding_coefficients
 
@@ -366,6 +367,9 @@ class QuicConnection:
             quic_logger=self._quic_logger,
             send_probe=self._send_probe,
         )
+
+        # fec
+        self._fec_recoverer = FECRecoverer()
 
         # things to send
         self._close_pending = False
@@ -964,6 +968,21 @@ class QuicConnection:
                         event="spin_bit_updated",
                         data={"state": self._spin_bit},
                     )
+
+            recovered_symbols = None
+            if not header.is_long_header:
+                if header.is_repair_header:
+                    self._fec_recoverer.add_repair_symbol(RepairSymbol(packet_number, header.nss, header.repair_key, plain_payload))
+                else:
+                    self._fec_recoverer.add_source_symbol(SourceSymbol(packet_number, plain_payload))
+
+                recovered_symbols = self._fec_recoverer.recover()
+                if recovered_symbols != None:
+                    plain_payload = recovered_symbols[0].data
+
+            # this repair packet doesn't help recover data
+            if header.is_repair_header and not recovered_symbols:
+                continue
 
             # handle payload
             context = QuicReceiveContext(

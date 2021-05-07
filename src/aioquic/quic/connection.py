@@ -104,6 +104,7 @@ EW_SIZE = 5
 FEC_PACE = 2
 FEC_MAX_DENSITY = 15
 FEC_REPAIR_KEY_UPPER_BOUND = 2**8  # we only have 8 bits to store this value
+PADDING_FRAME_TYPE = 0x40
 
 
 def EPOCHS(shortcut: str) -> FrozenSet[tls.Epoch]:
@@ -969,7 +970,10 @@ class QuicConnection:
                         data={"state": self._spin_bit},
                     )
 
-            recovered_symbols = None
+            plain_payloads = []
+            if not header.is_repair_header:
+                plain_payloads.append(plain_payloads)
+
             if not header.is_long_header:
                 if header.is_repair_header:
                     self._fec_recoverer.add_repair_symbol(RepairSymbol(packet_number, header.nss, header.repair_key, plain_payload))
@@ -977,75 +981,73 @@ class QuicConnection:
                     self._fec_recoverer.add_source_symbol(SourceSymbol(packet_number, plain_payload))
 
                 recovered_symbols = self._fec_recoverer.recover()
-                if recovered_symbols != None:
-                    plain_payload = recovered_symbols[0].data
+                if recovered_symbols is not None:
+                    for recovered_symbol in recovered_symbols:
+                        plain_payloads.append(recovered_symbol.data)
 
-            # this repair packet doesn't help recover data
-            if header.is_repair_header and not recovered_symbols:
-                continue
-
-            # handle payload
-            context = QuicReceiveContext(
-                epoch=epoch,
-                host_cid=header.destination_cid,
-                network_path=network_path,
-                quic_logger_frames=quic_logger_frames,
-                time=now,
-            )
-            try:
-                is_ack_eliciting, is_probing = self._payload_received(
-                    context, plain_payload
+            for payload in plain_payloads:
+                # handle payload
+                context = QuicReceiveContext(
+                    epoch=epoch,
+                    host_cid=header.destination_cid,
+                    network_path=network_path,
+                    quic_logger_frames=quic_logger_frames,
+                    time=now,
                 )
-            except QuicConnectionError as exc:
-                self._logger.warning(exc)
-                self.close(
-                    error_code=exc.error_code,
-                    frame_type=exc.frame_type,
-                    reason_phrase=exc.reason_phrase,
-                )
-            if self._state in END_STATES or self._close_pending:
-                return
+                try:
+                    is_ack_eliciting, is_probing = self._payload_received(
+                        context, payload
+                    )
+                except QuicConnectionError as exc:
+                    self._logger.warning(exc)
+                    self.close(
+                        error_code=exc.error_code,
+                        frame_type=exc.frame_type,
+                        reason_phrase=exc.reason_phrase,
+                    )
+                if self._state in END_STATES or self._close_pending:
+                    return
 
-            # update idle timeout
-            self._close_at = now + self._configuration.idle_timeout
+                # update idle timeout
+                self._close_at = now + self._configuration.idle_timeout
 
-            # handle migration
-            if (
-                not self._is_client
-                and context.host_cid != self.host_cid
-                and epoch == tls.Epoch.ONE_RTT
-            ):
-                self._logger.debug(
-                    "Peer switching to CID %s (%d)",
-                    dump_cid(context.host_cid),
-                    destination_cid_seq,
-                )
-                self.host_cid = context.host_cid
-                self.change_connection_id()
+                # handle migration
+                if (
+                        not self._is_client
+                        and context.host_cid != self.host_cid
+                        and epoch == tls.Epoch.ONE_RTT
+                ):
+                    self._logger.debug(
+                        "Peer switching to CID %s (%d)",
+                        dump_cid(context.host_cid),
+                        destination_cid_seq,
+                    )
+                    self.host_cid = context.host_cid
+                    self.change_connection_id()
 
-            # update network path
-            if not network_path.is_validated and epoch == tls.Epoch.HANDSHAKE:
-                self._logger.debug(
-                    "Network path %s validated by handshake", network_path.addr
-                )
-                network_path.is_validated = True
-            network_path.bytes_received += end_off - start_off
-            if network_path not in self._network_paths:
-                self._network_paths.append(network_path)
-            idx = self._network_paths.index(network_path)
-            if idx and not is_probing and packet_number > space.largest_received_packet:
-                self._logger.debug("Network path %s promoted", network_path.addr)
-                self._network_paths.pop(idx)
-                self._network_paths.insert(0, network_path)
+                # update network path
+                if not network_path.is_validated and epoch == tls.Epoch.HANDSHAKE:
+                    self._logger.debug(
+                        "Network path %s validated by handshake", network_path.addr
+                    )
+                    network_path.is_validated = True
+                network_path.bytes_received += end_off - start_off
+                if network_path not in self._network_paths:
+                    self._network_paths.append(network_path)
+                idx = self._network_paths.index(network_path)
+                if idx and not is_probing and packet_number > space.largest_received_packet:
+                    self._logger.debug("Network path %s promoted", network_path.addr)
+                    self._network_paths.pop(idx)
+                    self._network_paths.insert(0, network_path)
 
-            # record packet as received
-            if not space.discarded:
-                if packet_number > space.largest_received_packet:
-                    space.largest_received_packet = packet_number
-                    space.largest_received_time = now
-                space.ack_queue.add(packet_number)
-                if is_ack_eliciting and space.ack_at is None:
-                    space.ack_at = now + self._ack_delay
+                # record packet as received
+                if not space.discarded:
+                    if packet_number > space.largest_received_packet:
+                        space.largest_received_packet = packet_number
+                        space.largest_received_time = now
+                    space.ack_queue.add(packet_number)
+                    if is_ack_eliciting and space.ack_at is None:
+                        space.ack_at = now + self._ack_delay
 
     def request_key_update(self) -> None:
         """
@@ -2225,6 +2227,9 @@ class QuicConnection:
         is_probing = None
         while not buf.eof():
             frame_type = buf.pull_uint_var()
+
+            if frame_type == PADDING_FRAME_TYPE:
+                break
 
             # check frame type is known
             try:

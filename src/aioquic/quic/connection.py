@@ -21,6 +21,7 @@ from .packet import (
     PACKET_TYPE_ONE_RTT,
     PACKET_TYPE_RETRY,
     PACKET_TYPE_ZERO_RTT,
+    PACKET_TYPE_REPAIR,
     PROBING_FRAME_TYPES,
     RETRY_INTEGRITY_TAG_SIZE,
     STATELESS_RESET_TOKEN_SIZE,
@@ -902,7 +903,7 @@ class QuicConnection:
                 reserved_mask = 0x0C
             else:
                 reserved_mask = 0x18
-            if plain_header[0] & reserved_mask:
+            if plain_header[0] & reserved_mask and not header.is_repair_header:
                 self.close(
                     error_code=QuicErrorCode.PROTOCOL_VIOLATION,
                     frame_type=QuicFrameType.PADDING,
@@ -2706,7 +2707,7 @@ class QuicConnection:
                 self._fec_window.pop(0)
 
             # send repair if possible
-            if self._fec_src_cnt == self._fec_pace:
+            if len(self._fec_window) == self._fec_ew_size and self._fec_src_cnt >= self._fec_pace:
                 # clear src sent cnt
                 self._fec_src_cnt = 0
 

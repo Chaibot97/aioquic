@@ -19,7 +19,7 @@ PACKET_TYPE_ZERO_RTT = PACKET_LONG_HEADER | PACKET_FIXED_BIT | 0x10
 PACKET_TYPE_HANDSHAKE = PACKET_LONG_HEADER | PACKET_FIXED_BIT | 0x20
 PACKET_TYPE_RETRY = PACKET_LONG_HEADER | PACKET_FIXED_BIT | 0x30
 PACKET_TYPE_ONE_RTT = PACKET_FIXED_BIT
-PACKET_TYPE_REPAIR = 0x0a
+PACKET_TYPE_REPAIR = 0x09
 PACKET_TYPE_MASK = 0xF0
 
 CONNECTION_ID_MAX_SIZE = 20
@@ -138,7 +138,7 @@ def is_long_header(first_byte: int) -> bool:
 
 
 def is_repair_header(first_byte: int) -> bool:
-    return not bool(first_byte ^ PACKET_TYPE_REPAIR)
+    return not bool(first_byte & 0xe0)
 
 
 def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> QuicHeader:

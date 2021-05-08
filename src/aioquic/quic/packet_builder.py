@@ -212,7 +212,7 @@ class QuicPacketBuilder:
         ):
             raise QuicPacketBuilderStop
 
-        self._buffer.push_uint_var(frame_type)
+        self._buffer.push_uint8(frame_type)
         if frame_type not in NON_ACK_ELICITING_FRAME_TYPES:
             self._packet.is_ack_eliciting = True
         if frame_type not in NON_IN_FLIGHT_FRAME_TYPES:
@@ -437,7 +437,11 @@ class QuicPacketBuilder:
                 )
             )
             self._packet.sent_bytes = buf.tell() - self._packet_start
-            self._packets.append(self._packet)
+
+            # repair packet don't go in to recovery
+            if not self._packet_repair_header:
+                self._packets.append(self._packet)
+
             if self._packet.in_flight:
                 self._datagram_flight_bytes += self._packet.sent_bytes
 

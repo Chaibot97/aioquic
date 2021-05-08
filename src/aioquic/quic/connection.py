@@ -695,6 +695,8 @@ class QuicConnection:
         :param addr: The network address from which the datagram was received.
         :param now: The current time.
         """
+        if random.randint(0, 100) < 20:
+            return
 
         # stop handling packets when closing
         if self._state in END_STATES:
@@ -891,12 +893,6 @@ class QuicConnection:
                         event="packet_dropped",
                         data={"trigger": "payload_decrypt_error"},
                     )
-                continue
-
-            if random.randint(0, 100) < 20:
-                if not header.is_long_header and not header.is_repair_header:
-                    print("dropped short header packet with packet number ", packet_number)
-                    print(plain_payload.hex())
                 continue
 
             # check reserved bits
@@ -1430,7 +1426,7 @@ class QuicConnection:
         """
         error_code = buf.pull_uint_var()
         if frame_type == QuicFrameType.TRANSPORT_CLOSE:
-            frame_type = buf.pull_uint_var()
+            frame_type = buf.pull_uint_8()
         else:
             frame_type = None
         reason_length = buf.pull_uint_var()
@@ -2225,7 +2221,7 @@ class QuicConnection:
         is_ack_eliciting = False
         is_probing = None
         while not buf.eof():
-            frame_type = buf.pull_uint_var()
+            frame_type = buf.pull_uint8()
 
             if frame_type == PADDING_FRAME_TYPE:
                 break

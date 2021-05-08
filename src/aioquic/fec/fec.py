@@ -24,19 +24,23 @@ class FECRecoverer:
     def add_source_symbol(self, symbol):
         pos = symbol.packet_number - self._source_symbols_start
 
+        if pos < 0:
+            return
+
         if len(self._source_symbols) < pos + 1:
             self._source_symbols += [None] * (pos - len(self._source_symbols) + 1)
 
         self._source_symbols.insert(pos, symbol)
 
     def add_repair_symbol(self, symbol):
+        new_source_symbols_start = symbol.fss_esi - symbol.nss + 1
         # if advancing repair symbol is received, clear symbols associated with the old repair symbol
-        if len(self._repair_symbols) > 0 and symbol.fss_esi > self._repair_symbols[0].fss_esi:
+        if len(self._repair_symbols) > 0 and symbol.fss_esi > self._repair_symbols[0].fss_esi or new_source_symbols_start > self._source_symbols_start:
             self._repair_symbols = []
-            new_source_symbols_start = symbol.fss_esi - symbol.nss + 1
             move_step = new_source_symbols_start - self._source_symbols_start
             self._source_symbols = self._source_symbols[move_step:] if len(self._source_symbols) > move_step else []
             self._source_symbols_start = new_source_symbols_start
+
         self._repair_symbols.append(symbol)
 
     def recover(self):
@@ -50,6 +54,8 @@ class FECRecoverer:
         repair_symbols = self._repair_symbols[:num_repair_symbols]
 
         window = self._source_symbols[:min(len(self._source_symbols), nss)]
+        if len(window) < nss:
+            window += [None] * (nss - len(window))
         missing_symbols_indices = [i for i, s in enumerate(window) if s is None]
         received_symbols = [s for i, s in enumerate(window) if s != None]
 

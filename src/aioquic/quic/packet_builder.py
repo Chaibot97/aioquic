@@ -18,6 +18,7 @@ from .packet import (
     is_long_header,
     is_repair_header
 )
+from ..fec.fec import FECEncoder
 
 PACKET_MAX_SIZE = 1280
 PACKET_LENGTH_SEND_SIZE = 2
@@ -72,6 +73,7 @@ class QuicPacketBuilder:
         peer_token: bytes = b"",
         quic_logger: Optional[QuicLoggerTrace] = None,
         spin_bit: bool = False,
+        fec_encoder: FECEncoder = None
     ):
         self.max_flight_bytes: Optional[int] = None
         self.max_total_bytes: Optional[int] = None
@@ -113,6 +115,9 @@ class QuicPacketBuilder:
         self._buffer = Buffer(PACKET_MAX_SIZE)
         self._buffer_capacity = PACKET_MAX_SIZE
         self._flight_capacity = PACKET_MAX_SIZE
+
+        # encoder
+        self._fec_encoder = fec_encoder
 
     @property
     def packet_is_empty(self) -> bool:
@@ -444,6 +449,9 @@ class QuicPacketBuilder:
             # do not increase packet number in case of repair packet
             if not self._packet_repair_header:
                 self._increment_packet_number()
+
+            if self._fec_encoder:
+                self._fec_encoder.try_add_repair_packet(self, self._packet_crypto)
 
         else:
             # "cancel" the packet

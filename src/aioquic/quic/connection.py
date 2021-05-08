@@ -49,9 +49,9 @@ from .packet_builder import (
 from .recovery import K_GRANULARITY, QuicPacketRecovery, QuicPacketSpace
 from .stream import FinalSizeError, QuicStream
 
-from ..fec.fec import RepairSymbol, SourceSymbol, FECRecoverer
-from ..fec.gf256_op import GF256LinearCombination
-from ..fec.tiny_mt_32 import generate_coding_coefficients
+from ..fec.fec import RepairSymbol, SourceSymbol, FECRecoverer, FECEncoder
+
+import random
 
 logger = logging.getLogger("quic")
 
@@ -99,11 +99,6 @@ RETIRE_CONNECTION_ID_CAPACITY = 1 + 8
 STREAMS_BLOCKED_CAPACITY = 1 + 8
 TRANSPORT_CLOSE_FRAME_CAPACITY = 1 + 8 + 8 + 8  # + reason length
 
-# FEC
-EW_SIZE = 5
-FEC_PACE = 2
-FEC_MAX_DENSITY = 15
-FEC_REPAIR_KEY_UPPER_BOUND = 2**8  # we only have 8 bits to store this value
 PADDING_FRAME_TYPE = 0x40
 
 
@@ -371,6 +366,7 @@ class QuicConnection:
 
         # fec
         self._fec_recoverer = FECRecoverer()
+        self._fec_encoder = FECEncoder()
 
         # things to send
         self._close_pending = False
@@ -421,14 +417,6 @@ class QuicConnection:
             0x30: (self._handle_datagram_frame, EPOCHS("01")),
             0x31: (self._handle_datagram_frame, EPOCHS("01")),
         }
-
-        # fec
-        self._fec_window = []  # all the packet data
-        self._fec_window_last_packet_num = 0
-        self._fec_ew_size = EW_SIZE  # the maximum number of src symbols the repair symbol covers
-        self._fec_pace = FEC_PACE  # send 1 repair symbol after sending every FEC_PACE src symbols
-        self._fec_src_cnt = 0  # track the number of consecutive src symbols without sending the repair symbol
-        self._fec_repair_key = 0
 
     @property
     def configuration(self) -> QuicConfiguration:
@@ -523,6 +511,7 @@ class QuicConnection:
             quic_logger=self._quic_logger,
             spin_bit=self._spin_bit,
             version=self._version,
+            fec_encoder=self._fec_encoder
         )
         if self._close_pending:
             epoch_packet_types = []
@@ -706,6 +695,7 @@ class QuicConnection:
         :param addr: The network address from which the datagram was received.
         :param now: The current time.
         """
+
         # stop handling packets when closing
         if self._state in END_STATES:
             return
@@ -817,12 +807,12 @@ class QuicConnection:
                     and header.destination_cid == self.host_cid
                     and header.integrity_tag
                     == get_retry_integrity_tag(
-                        buf.data_slice(
-                            start_off, buf.tell() - RETRY_INTEGRITY_TAG_SIZE
-                        ),
-                        self._peer_cid.cid,
-                        version=header.version,
-                    )
+                    buf.data_slice(
+                        start_off, buf.tell() - RETRY_INTEGRITY_TAG_SIZE
+                    ),
+                    self._peer_cid.cid,
+                    version=header.version,
+                )
                 ):
                     if self._quic_logger is not None:
                         self._quic_logger.log_event(
@@ -903,6 +893,12 @@ class QuicConnection:
                     )
                 continue
 
+            if random.randint(0, 100) < 20:
+                if not header.is_long_header and not header.is_repair_header:
+                    print("dropped short header packet with packet number ", packet_number)
+                    print(plain_payload.hex())
+                continue
+
             # check reserved bits
             if header.is_long_header:
                 reserved_mask = 0x0C
@@ -976,13 +972,16 @@ class QuicConnection:
 
             if not header.is_long_header:
                 if header.is_repair_header:
-                    self._fec_recoverer.add_repair_symbol(RepairSymbol(packet_number, header.nss, header.repair_key, plain_payload))
+                    self._fec_recoverer.add_repair_symbol(
+                        RepairSymbol(packet_number, header.nss, header.repair_key, plain_payload))
                 else:
                     self._fec_recoverer.add_source_symbol(SourceSymbol(packet_number, plain_payload))
 
                 recovered_symbols = self._fec_recoverer.recover()
                 if recovered_symbols is not None:
                     for recovered_symbol in recovered_symbols:
+                        print("recovered packet with packet number: ", recovered_symbol.packet_number)
+                        print(recovered_symbol.data.hex())
                         plain_payloads.append(recovered_symbol.data)
 
             for payload in plain_payloads:
@@ -1013,9 +1012,9 @@ class QuicConnection:
 
                 # handle migration
                 if (
-                        not self._is_client
-                        and context.host_cid != self.host_cid
-                        and epoch == tls.Epoch.ONE_RTT
+                    not self._is_client
+                    and context.host_cid != self.host_cid
+                    and epoch == tls.Epoch.ONE_RTT
                 ):
                     self._logger.debug(
                         "Peer switching to CID %s (%d)",
@@ -1288,7 +1287,7 @@ class QuicConnection:
                 error_code=QuicErrorCode.PROTOCOL_VIOLATION,
                 frame_type=QuicFrameType.CRYPTO,
                 reason_phrase="Invalid max_early_data value %s"
-                % session_ticket.max_early_data_size,
+                              % session_ticket.max_early_data_size,
             )
         self._session_ticket_handler(session_ticket)
 
@@ -1512,7 +1511,7 @@ class QuicConnection:
                 if not self._parameters_received:
                     raise QuicConnectionError(
                         error_code=QuicErrorCode.CRYPTO_ERROR
-                        + tls.AlertDescription.missing_extension,
+                                   + tls.AlertDescription.missing_extension,
                         frame_type=frame_type,
                         reason_phrase="No QUIC transport parameters received",
                     )
@@ -2707,49 +2706,7 @@ class QuicConnection:
             if builder.packet_is_empty:
                 break
             else:
-                # add repair packet
-                self._try_add_repair_packet(builder, crypto)
-
                 self._loss._pacer.update_after_send(now=now)
-
-    def _try_add_repair_packet(self, builder: QuicPacketBuilder, crypto: CryptoPair) -> None:
-        # try end the current packet if possible
-        builder.try_end_packet()
-
-        # fetch the short header packet payload if possible
-        payload = builder.current_short_header_packet_payload
-        if payload is not None:
-            # increase the src_cnt (the number of consecutive short header packet without sending repair packet)
-            self._fec_src_cnt += 1
-
-            # record last short header packet sent
-            self._fec_window.append(payload)
-            self._fec_window_last_packet_num = builder.current_short_header_packet_num
-
-            # adjust the window
-            while len(self._fec_window) > self._fec_ew_size:
-                self._fec_window.pop(0)
-
-            # send repair if possible
-            if len(self._fec_window) == self._fec_ew_size and self._fec_src_cnt >= self._fec_pace:
-                # clear src sent cnt
-                self._fec_src_cnt = 0
-
-                # repair key
-                repair_key = self._fec_repair_key
-                self._fec_repair_key = (repair_key + 1) % FEC_REPAIR_KEY_UPPER_BOUND
-
-                fss_esi = self._fec_window_last_packet_num
-                nss = len(self._fec_window)
-
-                # get coeffs
-                window_size = len(self._fec_window)
-                coeffs = generate_coding_coefficients(repair_key, window_size, FEC_MAX_DENSITY)
-
-                # compute repair payload
-                payload = GF256LinearCombination(self._fec_window, coeffs)
-
-                builder.build_repair_packet(crypto, fss_esi, nss, repair_key, payload)
 
     def _write_handshake(
         self, builder: QuicPacketBuilder, epoch: tls.Epoch, now: float
@@ -2784,9 +2741,9 @@ class QuicConnection:
                 self._probe_pending
                 and not self._handshake_complete
                 and (
-                    epoch == tls.Epoch.HANDSHAKE
-                    or not self._cryptos[tls.Epoch.HANDSHAKE].send.is_valid()
-                )
+                epoch == tls.Epoch.HANDSHAKE
+                or not self._cryptos[tls.Epoch.HANDSHAKE].send.is_valid()
+            )
             ):
                 self._write_ping_frame(builder, comment="probe")
                 self._probe_pending = False

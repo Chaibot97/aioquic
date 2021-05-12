@@ -5,6 +5,7 @@ from ..quic.crypto import CryptoPair
 FEC_MAX_DENSITY = 15
 EW_SIZE = 5
 FEC_PACE = 2
+NUM_REPAIR = 2
 FEC_REPAIR_KEY_UPPER_BOUND = 2 ** 8  # we only have 8 bits to store this value
 PADDING_FRAME_TYPE = 0x40
 
@@ -43,8 +44,8 @@ class FECRecoverer:
     def add_repair_symbol(self, symbol):
         new_source_symbols_start = symbol.fss_esi - symbol.nss + 1
         # if advancing repair symbol is received, clear symbols associated with the old repair symbol
-        if len(self._repair_symbols) > 0 and symbol.fss_esi > self._repair_symbols[
-            0].fss_esi or new_source_symbols_start > self._source_symbols_start:
+        if len(self._repair_symbols) > 0 and (symbol.fss_esi > self._repair_symbols[
+            0].fss_esi or new_source_symbols_start > self._source_symbols_start):
             self._repair_symbols = []
             move_step = new_source_symbols_start - self._source_symbols_start
             self._source_symbols = self._source_symbols[move_step:] if len(self._source_symbols) > move_step else []
@@ -56,22 +57,19 @@ class FECRecoverer:
         if len(self._repair_symbols) == 0:
             return None
 
-        fss_esi = self._repair_symbols[0].fss_esi
         nss = self._repair_symbols[0].nss
 
-        num_repair_symbols = len(self._repair_symbols)
-        repair_symbols = self._repair_symbols[:num_repair_symbols]
-
-        window = self._source_symbols[:min(len(self._source_symbols), nss)]
-        if len(window) < nss:
-            window += [None] * (nss - len(window))
+        if len(self._source_symbols) < nss:
+            self._source_symbols += [None] * (nss - len(self._source_symbols))
+        window = self._source_symbols[:nss]
+        
         missing_symbols_indices = [i for i, s in enumerate(window) if s is None]
         received_symbols = [s for i, s in enumerate(window) if s != None]
 
         # if can recover
-        if len(missing_symbols_indices) <= len(repair_symbols) and len(missing_symbols_indices) > 0:
+        if len(missing_symbols_indices) <= len(self._repair_symbols) and len(missing_symbols_indices) > 0:
             # remove extra repair symbols
-            repair_symbols = repair_symbols[:len(missing_symbols_indices)]
+            repair_symbols = self._repair_symbols[:len(missing_symbols_indices)]
 
             # prepare data from recovery
             repair_data = [s.data for s in repair_symbols]
@@ -133,18 +131,19 @@ class FECEncoder:
                 # clear src sent cnt
                 self._fec_src_cnt = 0
 
-                # repair key
-                repair_key = self._fec_repair_key
-                self._fec_repair_key = (repair_key + 1) % FEC_REPAIR_KEY_UPPER_BOUND
+                for i in range(NUM_REPAIR):
+                    # repair key
+                    repair_key = self._fec_repair_key
+                    self._fec_repair_key = (repair_key + 1) % FEC_REPAIR_KEY_UPPER_BOUND
 
-                fss_esi = self._fec_window_last_packet_num
-                nss = len(self._fec_window)
+                    fss_esi = self._fec_window_last_packet_num
+                    nss = len(self._fec_window)
 
-                # get coeffs
-                window_size = len(self._fec_window)
-                coeffs = generate_coding_coefficients(repair_key, window_size, FEC_MAX_DENSITY)
+                    # get coeffs
+                    window_size = len(self._fec_window)
+                    coeffs = generate_coding_coefficients(repair_key, window_size, FEC_MAX_DENSITY)
 
-                # compute repair payload
-                payload = GF256LinearCombination(self._fec_window, coeffs)
+                    # compute repair payload
+                    payload = GF256LinearCombination(self._fec_window, coeffs)
 
-                builder.build_repair_packet(crypto, fss_esi, nss, repair_key, payload)
+                    builder.build_repair_packet(crypto, fss_esi, nss, repair_key, payload)

@@ -121,8 +121,11 @@ def GF256PacketRecover(repair_vectors: [bytes],
   gf256_system.gaussElimination()
   gf256_system.solve()
 
-  recovered_packets = [bytes(con.toListOfInt()) for con in gf256_system.cons]
-  return recovered_packets
+  if gf256_system.solved:
+    recovered_packets = [bytes(con.toListOfInt()) for con in gf256_system.cons]
+    return recovered_packets
+  else:
+    return None
 
 
 class GF256System:
@@ -130,6 +133,7 @@ class GF256System:
     self.vars = set()
     self.eqs = []
     self.cons = []
+    self.solved = False
 
   def addEq(self, eq, var, con):
     self.eqs.append(eq)
@@ -167,7 +171,7 @@ class GF256System:
     m = len(self.eqs)
     n = len(self.vars)
     while r < m and c < n:
-      i_max = 0
+      i_max = r
       for i in range(r, m):
         if self.eqs[i].cmpAt(self.eqs[i_max], c) > 0:
           i_max = i
@@ -180,9 +184,9 @@ class GF256System:
             f = self.eqs[i][c] / self.eqs[r][c]
             # print(self.eqs[i][c],self.eqs[r][c], f)
             self.eqs[i][c] = GF256Number(0)
-            # for j in range(c + 1, n):
-            #   self.eqs[i][j] = self.eqs[i][j] - self.eqs[r][j] * f
-            self.eqs[i] -= self.eqs[r].scale(f)
+            for j in range(c + 1, n):
+              self.eqs[i][j] = self.eqs[i][j] - self.eqs[r][j] * f
+            # self.eqs[i] -= self.eqs[r].scale(f)
             self.cons[i] -= self.cons[r].scale(f)
 
           r += 1
@@ -190,11 +194,14 @@ class GF256System:
 
   def solve(self):
     for r in range(len(self.eqs) - 1, -1, -1):
+      if self.eqs[r][r] == GF256Number(0):
+        return
       for c in range(len(self.eqs) - 1, r, -1):
         self.cons[r] -= self.cons[c].scale(self.eqs[r][c])
         self.eqs[r][c] = GF256Number(0)
       self.cons[r] = self.cons[r].scale(GF256Number(1) /self.eqs[r][r])
       self.eqs[r][r] = GF256Number(1)
+    self.solved = True
 
 
 

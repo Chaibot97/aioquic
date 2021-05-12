@@ -1426,7 +1426,7 @@ class QuicConnection:
         """
         error_code = buf.pull_uint_var()
         if frame_type == QuicFrameType.TRANSPORT_CLOSE:
-            frame_type = buf.pull_uint_8()
+            frame_type = buf.pull_uint8()
         else:
             frame_type = None
         reason_length = buf.pull_uint_var()
